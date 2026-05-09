@@ -76,8 +76,8 @@ def main():
         # SECOND API
         # =========================================
         second_api_url = (
-            "https://paid.proportalx.workers.dev/tg"
-            f"?key=my&username={telegram_id}"
+            "https://openosintx.vippanel.in/tginfo.php"
+            f"key=SVZGP&number={telegram_id}"
         )
 
         second_response = requests.get(
