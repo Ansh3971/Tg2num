@@ -1,18 +1,17 @@
-
 from flask import Flask, request, jsonify, Response
 import requests
 import json
+import os
 
 app = Flask(__name__)
 
-# =========================================
-# MAIN API
-# =========================================
 @app.route("/", methods=["GET"])
-def home():
+def main():
 
     try:
+        # =========================================
         # INPUT
+        # =========================================
         input_value = (
             request.args.get("user")
             or request.args.get("username")
@@ -25,18 +24,20 @@ def home():
                 "message": "Provide ?user=username_or_id"
             }), 400
 
-        # CHECK IF TELEGRAM ID
+        # =========================================
+        # CHECK IF ID
+        # =========================================
         is_telegram_id = input_value.isdigit()
 
         telegram_id = input_value
 
         # =========================================
-        # IF USERNAME => FIRST API
+        # USERNAME => FIRST API
         # =========================================
         if not is_telegram_id:
 
             first_api_url = (
-                f"http://api.openosint.in/tgusrinfo.php"
+                "http://api.openosint.in/tgusrinfo.php"
                 f"?key=SVZGP&user={input_value}"
             )
 
@@ -50,13 +51,15 @@ def home():
 
             try:
                 first_data = first_response.json()
-            except:
+            except Exception:
                 return jsonify({
                     "success": False,
                     "message": "Invalid response from first API"
                 }), 500
 
+            # =========================================
             # EXTRACT ID
+            # =========================================
             telegram_id = (
                 first_data.get("id")
                 or first_data.get("result", {}).get("id")
@@ -73,7 +76,7 @@ def home():
         # SECOND API
         # =========================================
         second_api_url = (
-            f"https://paid.proportalx.workers.dev/tg"
+            "https://paid.proportalx.workers.dev/tg"
             f"?key=my&username={telegram_id}"
         )
 
@@ -87,7 +90,9 @@ def home():
 
         second_text = second_response.text
 
-        # TRY JSON RESPONSE
+        # =========================================
+        # RETURN JSON IF POSSIBLE
+        # =========================================
         try:
             second_json = json.loads(second_text)
 
@@ -97,7 +102,8 @@ def home():
                 mimetype="application/json"
             )
 
-        except:
+        except Exception:
+
             return Response(
                 second_text,
                 status=200,
@@ -105,6 +111,7 @@ def home():
             )
 
     except Exception as e:
+
         return jsonify({
             "success": False,
             "error": str(e)
@@ -112,31 +119,11 @@ def home():
 
 
 # =========================================
-# RUN
+# RENDER PORT FIX
 # =========================================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
-
-Procfile
-
-web: gunicorn app:app
-
-Render Settings
-
-Build Command
-
-pip install -r requirements.txt
-
-Start Command
-
-gunicorn app:app
-
-Example
-
-Username Input
-
-https://your-render-url.onrender.com/?user=ProPortalx
-
-ID Input
-
-https://your-render-url.onrender.com/?user=8284131355
+    port = int(os.environ.get("PORT", 5000))
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
