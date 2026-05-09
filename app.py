@@ -37,8 +37,8 @@ def main():
         if not is_telegram_id:
 
             first_api_url = (
-                "http://api.openosint.in/tgusrinfo.php"
-                f"?key=SVZGP&user={input_value}"
+                ""https://paid.proportalx.workers.dev/tg"
+                f"?key=my&username={input_value}"
             )
 
             first_response = requests.get(
