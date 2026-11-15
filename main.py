@@ -3,29 +3,30 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
-PARQUET_URL = "https://huggingface.co/datasets/PhisherJR/GlobalTG/resolve/main/idx_tgid_in.parquet"
+# 1. Old Global Database
+GLOBAL_PARQUET_URL = "https://huggingface.co/datasets/PhisherJR/GlobalTG/resolve/main/idx_tgid_in.parquet"
 
-# DuckDB read-only connection
+# 2. Sharded Database Base Pattern
+SHARD_BASE_URL = "https://huggingface.co/datasets/00000N0/Tgdata/resolve/main/TG_DATA_PARTS/part_id%3D{part_id}/data_0.parquet"
+
 db_conn = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global db_conn
-    # DuckDB in-memory initialization
     db_conn = duckdb.connect(database=":memory:")
-    # httpfs automatically enabled in DuckDB >= 1.0, explicit enable for safety
+    # Metadata cache enable taaki remote Parquet fast load ho
     db_conn.execute("SET enable_http_metadata_cache=true;")
     yield
     if db_conn:
         db_conn.close()
 
 app = FastAPI(
-    title="Parquet Query API",
-    version="1.0.0",
+    title="Telegram Multi-Source Parquet API",
+    version="2.0.0",
     lifespan=lifespan
 )
 
-# CORS allow for frontend / web integrations
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -34,66 +35,112 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+def get_shard_url_from_query(query_str: str) -> str | None:
+    """Extracts last 2 digits from query and formats shard URL."""
+    digits = "".join(filter(str.isdigit, str(query_str)))
+    if not digits:
+        return None
+    # Last 2 digits ko integer me convert karte hain (e.g. '00' -> 0, '05' -> 5, '28' -> 28)
+    part_id = int(digits[-2:]) if len(digits) >= 2 else int(digits)
+    return SHARD_BASE_URL.format(part_id=part_id)
+
+def execute_parquet_search(file_url: str, search_val: str, explicit_col: str | None = None, limit: int = 10):
+    """Dynamically detects matching ID column and queries remote parquet."""
+    try:
+        # Schema inspect
+        schema_rows = db_conn.execute(f"DESCRIBE SELECT * FROM '{file_url}' LIMIT 1;").fetchall()
+        columns = [row[0] for row in schema_rows]
+
+        # Target column select
+        if explicit_col and explicit_col in columns:
+            target_cols = [explicit_col]
+        else:
+            # Common Telegram ID field names prioritize
+            priority_names = ["tg_id", "id", "user_id", "telegram_id", "phone", "username"]
+            target_cols = [c for c in priority_names if c in columns]
+            if not target_cols:
+                target_cols = columns  # Fallback to all columns if no standard ID field
+
+        where_conditions = " OR ".join([f'CAST("{col}" AS VARCHAR) = ?' for col in target_cols])
+        sql = f"SELECT * FROM '{file_url}' WHERE {where_conditions} LIMIT {limit};"
+
+        cursor = db_conn.execute(sql, [str(search_val)] * len(target_cols))
+        result_cols = [c[0] for c in cursor.description]
+        rows = cursor.fetchall()
+
+        # Clean empty / null fields from records
+        results = []
+        for row in rows:
+            record = {k: v for k, v in zip(result_cols, row) if v is not None and v != ""}
+            results.append(record)
+
+        return {"status": "success", "count": len(results), "data": results, "error": None}
+
+    except Exception as e:
+        return {"status": "error", "count": 0, "data": [], "error": str(e)}
+
 @app.get("/")
 def root():
     return {
         "status": "online",
+        "description": "Multi-source Parquet Search API (Global + Sharded 0-99)",
         "endpoints": {
-            "/schema": "Check columns and data types in the parquet file",
-            "/search?q=VALUE": "Search records by specific ID/column"
+            "/search?q=12345678": "Search across both Global and Sharded databases"
         }
     }
 
-@app.get("/schema")
-def get_schema():
-    """Inspects table columns and types without reading the whole file."""
-    try:
-        schema_query = f"DESCRIBE SELECT * FROM '{PARQUET_URL}' LIMIT 1;"
-        result = db_conn.execute(schema_query).fetchall()
-        columns = [{"name": row[0], "type": row[1]} for row in result]
-        return {"columns": columns}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-
 @app.get("/search")
 def search(
-    column: str = Query(default="tg_id", description="Column to search in (e.g., tg_id, id, etc.)"),
-    q: str = Query(..., description="Query value to search"),
-    limit: int = Query(default=10, le=100, description="Max records to return")
+    q: str = Query(..., description="Telegram ID / Phone / Query value"),
+    column: str = Query(default=None, description="Optional: specific column to search"),
+    limit: int = Query(default=10, le=50, description="Max records to return per database")
 ):
-    try:
-        # Validate column name to prevent SQL injection
-        allowed_columns = [
-            row[0] for row in db_conn.execute(f"DESCRIBE SELECT * FROM '{PARQUET_URL}' LIMIT 1;").fetchall()
-        ]
-        
-        if column not in allowed_columns:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid column '{column}'. Available columns: {allowed_columns}"
-            )
+    q_clean = q.strip()
+    if not q_clean:
+        raise HTTPException(status_code=400, detail="Query parameter 'q' cannot be empty.")
 
-        # Parameterized query execution
-        query_sql = f"""
-            SELECT * 
-            FROM '{PARQUET_URL}' 
-            WHERE CAST("{column}" AS VARCHAR) = ? 
-            LIMIT ?
-        """
-        cursor = db_conn.execute(query_sql, [str(q), limit])
-        columns = [col[0] for col in cursor.description]
-        rows = cursor.fetchall()
+    # 1. Query Global Parquet (Old Data)
+    global_res = execute_parquet_search(
+        file_url=GLOBAL_PARQUET_URL,
+        search_val=q_clean,
+        explicit_col=column,
+        limit=limit
+    )
 
-        if not rows:
-            return {"count": 0, "results": [], "message": "No records found"}
-
-        data = [dict(zip(columns, row)) for row in rows]
-        return {
-            "count": len(data),
-            "results": data
+    # 2. Query Sharded Parquet (New Data based on last 2 digits)
+    shard_url = get_shard_url_from_query(q_clean)
+    if shard_url:
+        shard_res = execute_parquet_search(
+            file_url=shard_url,
+            search_val=q_clean,
+            explicit_col=column,
+            limit=limit
+        )
+    else:
+        shard_res = {
+            "status": "skipped",
+            "count": 0,
+            "data": [],
+            "error": "Query contains no numeric digits to determine shard ID."
         }
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Query error: {str(e)}")
+    # Combined total count
+    total_found = global_res["count"] + shard_res["count"]
+
+    return {
+        "query": q_clean,
+        "total_results": total_found,
+        "sources": {
+            "global_db": {
+                "count": global_res["count"],
+                "results": global_res["data"],
+                "error": global_res["error"]
+            },
+            "sharded_db": {
+                "shard_part": int("".join(filter(str.isdigit, q_clean))[-2:]) if shard_url else None,
+                "count": shard_res["count"],
+                "results": shard_res["data"],
+                "error": shard_res["error"]
+            }
+        }
+    }
